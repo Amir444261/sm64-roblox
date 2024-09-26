@@ -1,11 +1,13 @@
 --!strict
+
 local Core = script.Parent
+
 
 if Core:GetAttribute("HotLoading") then
 	task.wait(3)
 end
 
-for i, desc in script:GetDescendants() do
+for _, desc in script:GetDescendants() do
 	if desc:IsA("BaseScript") then
 		desc.Enabled = true
 	end
@@ -19,18 +21,29 @@ local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ContextActionService = game:GetService("ContextActionService")
 
+
+local FFlags = require(script.FFlags)
 local Shared = require(Core.Shared)
 local Sounds = Shared.Sounds
+local Sounds_L = Shared.Sounds_L
+local Sounds_N = Shared.Sounds_N
+local Sounds_scout = Shared.Sounds_scout
+local Sounds_w = Shared.Sounds_w
 
 local Enums = require(script.Enums)
 local Mario = require(script.Mario)
 local Types = require(script.Types)
 local Util = require(script.Util)
 
+local Interaction = require(script.Game.Interaction)
+local PlatformDisplacement = require(script.Game.PlatformDisplacement)
+
 local Action = Enums.Action
 local Buttons = Enums.Buttons
 local MarioFlags = Enums.MarioFlags
 local ParticleFlags = Enums.ParticleFlags
+
+local SurfaceClass = Enums.SurfaceClass
 
 type InputType = Enum.UserInputType | Enum.KeyCode
 type Controller = Types.Controller
@@ -41,6 +54,8 @@ local mario: Mario = Mario.new()
 
 local STEP_RATE = 30
 local NULL_TEXT = `<font color="#FF0000">NULL</font>`
+local TRUE_TEXT = `<font color="#00FF00">TRUE</font>`
+local FALSE_TEXT = `<font color="#FF0000">FALSE</font>`
 local FLIP = CFrame.Angles(0, math.pi, 0)
 
 local debugStats = Instance.new("BoolValue")
@@ -72,6 +87,7 @@ local AUTO_STATS = {
 	"CeilHeight",
 	"FloorHeight",
 	"WaterLevel",
+	"QuicksandDepth",
 }
 
 local ControlModule: {
@@ -99,6 +115,9 @@ end
 local BUTTON_FEED = {}
 local BUTTON_BINDS = {}
 
+local TAS_INPUT_OVERRIDE = false
+local COMMAND_WALK = false
+
 local function toStrictNumber(str: string): number
 	local result = tonumber(str)
 	return assert(result, "Invalid number!")
@@ -113,6 +132,17 @@ local function processAction(id: string, state: Enum.UserInputState, input: Inpu
 				local isDebug = not character:GetAttribute("Debug")
 				character:SetAttribute("Debug", isDebug)
 			end
+		end
+	elseif id == "TASInputForceToggle" then
+		if state == Enum.UserInputState.Begin then
+			TAS_INPUT_OVERRIDE = not TAS_INPUT_OVERRIDE
+			print(`<- TAS input override {TAS_INPUT_OVERRIDE and "ON" or "OFF"} ->`)
+		end
+	elseif id == "CommandWalk" then
+		if state == Enum.UserInputState.Begin then
+			COMMAND_WALK = true
+		else
+			COMMAND_WALK = false
 		end
 	else
 		local button = toStrictNumber(id:sub(5))
@@ -136,12 +166,14 @@ UserInputService.InputBegan:Connect(processInput)
 UserInputService.InputChanged:Connect(processInput)
 UserInputService.InputEnded:Connect(processInput)
 
-local function bindInput(button: number, label: string, ...: InputType)
+local function bindInput(button: number, label: string?, ...: InputType)
 	local id = "BTN_" .. button
 
 	if UserInputService.TouchEnabled then
-		ContextActionService:BindAction(id, processAction, true)
-		ContextActionService:SetTitle(id, label)
+		ContextActionService:BindAction(id, processAction, label ~= nil)
+		if label then
+			ContextActionService:SetTitle(id, label)
+		end
 	end
 
 	for i, input in { ... } do
@@ -158,7 +190,7 @@ local function updateCollisions()
 		if rootPart then
 			local parts = rootPart:GetConnectedParts(true)
 
-			for i, part in parts do
+			for _, part in parts do
 				if part:IsA("BasePart") then
 					part.CanCollide = false
 				end
@@ -179,6 +211,10 @@ local function updateController(controller: Controller, humanoid: Humanoid?)
 	if pos.Magnitude > 0 then
 		if pos.Magnitude > 1 then
 			pos = pos.Unit
+		end
+
+		if COMMAND_WALK then
+			pos *= 0.475
 		end
 
 		mag = pos.Magnitude
@@ -214,16 +250,20 @@ local function updateController(controller: Controller, humanoid: Humanoid?)
 	controller.ButtonPressed:Band(bit32.bxor(buttonValue, lastButtonValue))
 
 	local character = humanoid.Parent
-	if (character and character:GetAttribute("TAS")) or Core:GetAttribute("ToolAssistedInput") then
-		if not mario.Action:Has(Enums.ActionFlags.SWIMMING) then
-			if controller.ButtonDown:Has(Buttons.A_BUTTON) then
-				controller.ButtonPressed:Set(Buttons.A_BUTTON)
+	if
+		((character and character:GetAttribute("TAS")) or Core:GetAttribute("ToolAssistedInput"))
+		and not TAS_INPUT_OVERRIDE
+	then
+		if not mario.Action:Has(Enums.ActionFlags.SWIMMING, Enums.ActionFlags.HANGING) then
+			if controller.ButtonDown:Has(Buttons.A_BUTTON) and not controller.ButtonPressed:Has(Buttons.A_BUTTON) then
+				controller.ButtonPressed:Add(Buttons.A_BUTTON)
 			end
 		end
 	end
 end
 
-ContextActionService:BindAction("MarioDebug", processAction, false, Enum.KeyCode.P)
+ContextActionService:BindAction("CommandWalk", processAction, false, Enum.KeyCode.LeftControl)
+ContextActionService:BindAction("TASInputForceToggle", processAction, false, Enum.KeyCode.RightControl)
 bindInput(Buttons.B_BUTTON, "B", Enum.UserInputType.MouseButton1, Enum.KeyCode.ButtonX)
 bindInput(
 	Buttons.Z_TRIG,
@@ -234,6 +274,62 @@ bindInput(
 	Enum.KeyCode.ButtonR2
 )
 
+if (not FFlags.DEBUG_OFF_INGAME) or RunService:IsStudio() then
+	ContextActionService:BindAction("MarioDebug", processAction, false, Enum.KeyCode.P)
+end
+
+-- JPAD buttons
+--     ^
+--     U
+--  < HJK >
+--     v
+bindInput(Buttons.U_JPAD, nil, Enum.KeyCode.U, Enum.KeyCode.DPadUp)
+bindInput(Buttons.L_JPAD, nil, Enum.KeyCode.H, Enum.KeyCode.DPadLeft)
+bindInput(Buttons.R_JPAD, nil, Enum.KeyCode.K, Enum.KeyCode.DPadRight)
+bindInput(Buttons.D_JPAD, nil, Enum.KeyCode.J, Enum.KeyCode.DPadDown)
+
+-- Too lazy to make a require lazy loader
+do
+	local Mario = Mario :: any
+
+	if type(Interaction.ProcessMarioInteractions) == "function" then
+		function Mario.ProcessInteractions(m: Mario)
+			return Interaction.ProcessMarioInteractions(m)
+		end
+	end
+
+	if type(Interaction.MarioStopRidingAndHolding) == "function" then
+		function Mario.DropAndSetAction(m: Mario, action: number, actionArg: number?): boolean
+			Interaction.MarioStopRidingAndHolding(m)
+			return m:SetAction(action, actionArg)
+		end
+	end
+
+	if type(Interaction.MarioDropHeldObject) == "function" then
+		function Mario.DropHeldObject(m: Mario)
+			return Interaction.MarioDropHeldObject(m)
+		end
+	end
+
+	if type(Interaction.MarioThrowHeldObject) == "function" then
+		function Mario.ThrowHeldObject(m: Mario)
+			return Interaction.MarioThrowHeldObject(m)
+		end
+	end
+
+	if type(Interaction.MarioCheckObjectGrab) == "function" then
+		function Mario.CheckObjectGrab(m: Mario)
+			return Interaction.MarioCheckObjectGrab(m)
+		end
+	end
+
+	if type(Interaction.MarioGrabUsedObject) == "function" then
+		function Mario.GrabUsedObject(m: Mario)
+			return Interaction.MarioGrabUsedObject(m)
+		end
+	end
+end
+
 -------------------------------------------------------------------------------------------------------------------------------------------------------------
 -- Network Dispatch
 -------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -242,7 +338,7 @@ local Commands = {}
 local soundDecay = {}
 
 local lazyNetwork = ReplicatedStorage:WaitForChild("LazyNetwork")
-assert(lazyNetwork:IsA("RemoteEvent"), "bad lazyNetwork!")
+assert(lazyNetwork:IsA("UnreliableRemoteEvent"), "bad lazyNetwork!")
 
 local function stepDecay(sound: Sound)
 	local decay = soundDecay[sound]
@@ -260,11 +356,29 @@ local function stepDecay(sound: Sound)
 	sound.Playing = true
 end
 
+
 function Commands.PlaySound(player: Player, name: string)
-	local sound: Sound? = Sounds[name]
 	local character = player.Character
 	local rootPart = character and character.PrimaryPart
-
+	local sound = Sounds_L[name]
+	if character ~= nil and character:FindFirstChild("Luii") then
+		sound = Sounds_L[name]
+	end
+		if character ~= nil and character:FindFirstChild("NOOB") then
+			sound = Sounds_N[name]
+		end
+	if character ~= nil and character:FindFirstChild("1") then
+		sound = Sounds[name]
+		end
+	if character ~= nil and character:FindFirstChild("BONKS") then
+		sound = Sounds_scout[name]
+	end
+	if character ~= nil and character:FindFirstChild("1") then
+		sound = Sounds[name]
+	end
+	if character ~= nil and character:FindFirstChild("wario") then
+		sound = Sounds_w[name]
+	end
 	if rootPart and sound then
 		local oldSound: Instance? = rootPart:FindFirstChild(name)
 		local canPlay = true
@@ -287,6 +401,30 @@ function Commands.PlaySound(player: Player, name: string)
 			else
 				-- Allow stacking.
 				canPlay = true
+			end
+		elseif name:sub(1, 5) == "MARIO" then
+			-- If the mario sound has a higher priority, delete
+			-- the ones that are lower/equal the priority.
+			-- On the other side, don't play if there's a sound
+			-- with a higher priority playing than the one
+			-- we wish to play.
+			local nextMarioSound = Sounds[name]
+
+			if nextMarioSound then
+				local nextPriority = tonumber(nextMarioSound:GetAttribute("Priority")) or 128
+
+				for _, instance: Instance in rootPart:GetChildren() do
+					if (not instance:IsA("Sound")) or (instance.Name:sub(1, 5) ~= "MARIO") then
+						continue
+					end
+
+					local priority = tonumber(instance:GetAttribute("Priority")) or 128
+					if nextPriority >= priority then
+						instance:Destroy()
+					elseif priority >= nextPriority then
+						canPlay = false
+					end
+				end
 			end
 		end
 
@@ -334,12 +472,10 @@ end
 
 function Commands.SetTorsoAngle(player: Player, angle: Vector3int16)
 	local character = player.Character
-	local waist = character and character:FindFirstChild("Waist", true)
-
-	if waist and waist:IsA("Motor6D") then
-		local props = { C1 = Util.ToRotation(-angle) + waist.C1.Position }
-		local tween = TweenService:Create(waist, TweenInfo.new(0.1), props)
-		tween:Play()
+	local waist = character.mario["000-shadow"]["000-scale"]["002-switch"]["001-switch"].root["000-offset"]["002-rotate"]
+	if waist then
+		waist.CFrame = CFrame.new()*CFrame.Angles(math.rad(angle.Z/200),0,math.rad(angle.X/200*-1))
+		--BAD! BAD! JANK! Oh well! I cant figure out another solution so it stays!
 	end
 end
 
@@ -351,6 +487,17 @@ function Commands.SetHeadAngle(player: Player, angle: Vector3int16)
 		local props = { C1 = Util.ToRotation(-angle) + neck.C1.Position }
 		local tween = TweenService:Create(neck, TweenInfo.new(0.1), props)
 		tween:Play()
+	end
+end
+
+function Commands.SetHealth(player: Player, health: number)
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildWhichIsA("Humanoid")
+	health = math.max(health, 0.01) -- Don't kill Humanoid by keeping >0
+
+	if humanoid then
+		humanoid.MaxHealth = 8
+		humanoid.Health = health
 	end
 end
 
@@ -395,6 +542,7 @@ lazyNetwork.OnClientEvent:Connect(onNetworkReceive)
 local lastUpdate = os.clock()
 local lastHeadAngle: Vector3int16?
 local lastTorsoAngle: Vector3int16?
+local lastHealth: number?
 
 local activeScale = 1
 local subframe = 0 -- 30hz subframe
@@ -402,12 +550,18 @@ local emptyId = ""
 
 local goalCF: CFrame
 local prevCF: CFrame
+local goalCameraOffset: Vector3 = Vector3.zero
+local prevCameraOffset: Vector3 = Vector3.zero
+
 local activeTrack: AnimationTrack?
 
 local reset = Instance.new("BindableEvent")
 reset.Archivable = false
 reset.Parent = script
 reset.Name = "Reset"
+
+-- To not reach the 256 tracks limit warning
+local loadedAnims: { [string]: AnimationTrack } = {}
 
 if RunService:IsStudio() then
 	local dummySequence = Instance.new("KeyframeSequence")
@@ -432,21 +586,42 @@ local function setDebugStat(key: string, value: any)
 	elseif typeof(value) == "Vector3int16" then
 		value = string.format("%i, %i, %i", value.X, value.Y, value.Z)
 	elseif type(value) == "number" then
-		value = string.format("%.3f", value)
+		if math.abs(value) == math.huge then
+			local sign = math.sign(value) == -1 and "-" or ""
+			value = `{sign}∞`
+		else
+			value = string.format("%.3f", value)
+		end
 	end
 
 	debugStats:SetAttribute(key, value)
 end
 
+local autoResetThread: thread? = nil
 local function onReset()
+	if autoResetThread then
+		pcall(task.cancel, autoResetThread)
+		autoResetThread = nil :: any
+	end
+
 	local roblox = Vector3.yAxis * 100
+
+	if FFlags.USE_SPAWNLOCATIONS then
+		local spawnPos, faceAngle = Util.GetSpawnPosition()
+		mario.FaceAngle = faceAngle
+		roblox = spawnPos
+	else
+		mario.FaceAngle = Vector3int16.new()
+	end
+
 	local sm64 = Util.ToSM64(roblox)
 	local char = player.Character
 
 	if char then
+		local rootPart = char:FindFirstChild("HumanoidRootPart")
 		local reset = char:FindFirstChild("Reset")
 
-		local cf = CFrame.new(roblox)
+		local cf = CFrame.new(roblox) * Util.ToRotation(mario.FaceAngle)
 		char:PivotTo(cf)
 
 		goalCF = cf
@@ -455,6 +630,14 @@ local function onReset()
 		if reset and reset:IsA("RemoteEvent") then
 			reset:FireServer()
 		end
+
+		if rootPart then
+			for _, child: Instance in pairs(rootPart:GetChildren()) do
+				if child:IsA("Sound") and child.Name:sub(1, 5) == "MARIO" then
+					child:Destroy()
+				end
+			end
+		end
 	end
 
 	mario.SlideVelX = 0
@@ -462,38 +645,27 @@ local function onReset()
 	mario.ForwardVel = 0
 	mario.IntendedYaw = 0
 
+	mario.InvincTimer = 0
+	mario.HealCounter = 0
+	mario.HurtCounter = 0
+	mario.Health = 0x880
+
+	mario.CapTimer = 1
+	mario.BurnTimer = 0
+	mario.SquishTimer = 0
+	mario.QuicksandDepth = 0
+
+	mario:DropHeldObject()
+	mario.PoleObj = nil
+
 	mario.Position = sm64
 	mario.Velocity = Vector3.zero
-	mario.FaceAngle = Vector3int16.new()
 
+	mario.Flags:Remove(MarioFlags.SPECIAL_CAPS)
 	mario:SetAction(Action.SPAWN_SPIN_AIRBORNE)
 end
 
-local function getWaterLevel(pos: Vector3)
-	local terrain = workspace.Terrain
-	local voxelPos = terrain:WorldToCellPreferSolid(pos)
-
-	local voxelRegion = Region3.new(voxelPos * 4, (voxelPos + Vector3.one + (Vector3.yAxis * 3)) * 4)
-	voxelRegion = voxelRegion:ExpandToGrid(4)
-
-	local materials, occupancies = terrain:ReadVoxels(voxelRegion, 4)
-	local size: Vector3 = occupancies.Size
-	local waterLevel = -11000
-
-	for y = 1, size.Y do
-		local occupancy = occupancies[1][y][1]
-		local material = materials[1][y][1]
-
-		if occupancy >= 0.9 and material == Enum.Material.Water then
-			local top = ((voxelPos.Y * 4) + (4 * y + 2))
-			waterLevel = math.max(waterLevel, top / Util.Scale)
-		end
-	end
-
-	return waterLevel
-end
-
-local function update()
+local function update(dt: number)
 	local character = player.Character
 
 	if not character then
@@ -501,8 +673,9 @@ local function update()
 	end
 
 	local now = os.clock()
+	-- local dt = math.min(dt, 0.1)
 	local gfxRot = CFrame.identity
-	local scale = character:GetScale()
+	local scale = tonumber(character:GetAttribute("Scale")) or character:GetScale()
 
 	if scale ~= activeScale then
 		local marioPos = Util.ToRoblox(mario.Position)
@@ -525,45 +698,98 @@ local function update()
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local simSpeed = tonumber(character:GetAttribute("TimeScale") or nil) or 1
 
-	local robloxPos = Util.ToRoblox(mario.Position)
-	mario.WaterLevel = getWaterLevel(robloxPos)
+	Util.DebugCollisionFaces(mario.Wall, mario.Ceil, mario.Floor)
 	Util.DebugWater(mario.WaterLevel)
 
-	subframe += (now - lastUpdate) * (STEP_RATE * simSpeed)
+	subframe += math.min(now - lastUpdate, FFlags.DELTA_MAX) * (STEP_RATE * simSpeed)
 	lastUpdate = now
 
-	if character:GetAttribute("WingCap") or Core:GetAttribute("WingCap") then
-		mario.Flags:Add(MarioFlags.WING_CAP)
-	else
-		mario.Flags:Remove(MarioFlags.WING_CAP)
-	end
+	--! This code interferes with obtaining the caps normally.
+	--  TODO solve this better
+	if mario.CapTimer == 0 then
+		if character:GetAttribute("WingCap") or Core:GetAttribute("WingCap") then
+			mario.Flags:Add(MarioFlags.WING_CAP)
+		else
+			mario.Flags:Remove(MarioFlags.WING_CAP)
+		end
 
-	if character:GetAttribute("Metal") then
-		mario.Flags:Add(MarioFlags.METAL_CAP)
-	else
-		mario.Flags:Remove(MarioFlags.METAL_CAP)
+		if character:GetAttribute("Metal") then
+			mario.Flags:Add(MarioFlags.METAL_CAP)
+		else
+			mario.Flags:Remove(MarioFlags.METAL_CAP)
+		end
 	end
 
 	subframe = math.min(subframe, 4) -- Prevent execution runoff
-
 	while subframe >= 1 do
+		Util.GlobalTimer += 1
 		subframe -= 1
 		updateCollisions()
 
+		PlatformDisplacement.ApplyMarioPlatformDisplacement(mario)
 		updateController(mario.Controller, humanoid)
 		mario:ExecuteAction()
 
-		local gfxPos = Util.ToRoblox(mario.Position)
+		-- Mario code updates MarioState's versions of position etc, so we need
+		-- to sync it with the Mario object
+		local marioObj = (mario :: any).MarioObj
+		if marioObj then
+			mario:CopyMarioStateToObject(marioObj)
+		end
+
+		local gfxPosOffset = Util.ToRoblox(mario.GfxPos)
+		local gfxPos = Util.ToRoblox(mario.Position) + gfxPosOffset
+		local throwPos = Util.ToRoblox((mario.ThrowMatrix or CFrame.identity).Position)
 		gfxRot = Util.ToRotation(mario.GfxAngle)
+
+		mario.GfxPos = Vector3.zero
+		mario.GfxAngle = Vector3int16.new()
 
 		prevCF = goalCF
 		goalCF = CFrame.new(gfxPos) * FLIP * gfxRot
+
+		local devCameraOffset = if humanoid
+			then (humanoid:GetAttribute("CameraOffset") or Vector3.zero)
+			else Vector3.zero
+		local thisGoalCamOffset = -gfxPosOffset + devCameraOffset
+
+		if throwPos.Magnitude > 0 then
+			local throwDisplace = Util.ToRoblox(mario.Position) - throwPos
+			thisGoalCamOffset += throwDisplace
+		end
+
+		prevCameraOffset = goalCameraOffset
+		goalCameraOffset = thisGoalCamOffset
+	end
+
+	-- Auto reset logic (Optional)
+	-- Remove if you have your own solutions
+	if FFlags.AUTO_RESET_ON_DEAD then
+		--stylua: ignore
+		local function isDead(): boolean
+			local action = mario.Action()
+			return mario.Health < 0x100 or (
+				(action == Action.QUICKSAND_DEATH and mario.QuicksandDepth >= 100)
+			)
+		end
+
+		if isDead() and not autoResetThread then
+			autoResetThread = task.delay(3, function()
+				if isDead() then
+					return onReset()
+				end
+
+				pcall(task.cancel, autoResetThread)
+				autoResetThread = nil :: any
+			end)
+		end
 	end
 
 	if character and goalCF then
 		local cf = character:GetPivot()
 		local rootPart = character.PrimaryPart
 		local animator = character:FindFirstChildWhichIsA("Animator", true)
+		local isExternalAnims = (humanoid and humanoid:HasTag("HandleAnimsExternally"))
 
 		if animator and (mario.AnimDirty or mario.AnimReset) and mario.AnimFrame >= 0 then
 			local anim = mario.AnimCurrent
@@ -573,6 +799,7 @@ local function update()
 				if tostring(activeTrack.Animation) == "TURNING_PART1" then
 					if anim and anim.Name == "TURNING_PART2" then
 						mario.AnimSkipInterp = 2
+						mario.AnimSetFrame = 0
 						animSpeed *= 2
 					end
 				end
@@ -590,26 +817,33 @@ local function update()
 					anim.AnimationId = emptyId
 				end
 
-				local track = animator:LoadAnimation(anim)
-				track:Play(animSpeed, 1, 0)
+				local track = loadedAnims[anim.Name] or animator:LoadAnimation(anim)
 				activeTrack = track
-			end
 
-			if activeTrack then
-				local speed = mario.AnimAccel / 0x10000
-
-				if speed > 0 then
-					activeTrack:AdjustSpeed(speed * simSpeed)
+				if not isExternalAnims then
+					if not loadedAnims[anim.Name] then
+						loadedAnims[anim.Name] = track
+					end
+					track:Play(animSpeed, 1, 0)
 				else
-					activeTrack:AdjustSpeed(simSpeed)
+					animator:SetAttribute("AnimSetFrame", 0)
 				end
 			end
-
 			mario.AnimDirty = false
 			mario.AnimReset = false
 		end
 
+		if activeTrack then
+			local speed = mario.AnimAccel / 0x10000
+			speed = if speed > 0 then speed * simSpeed else simSpeed
+			activeTrack:AdjustSpeed(speed)
+		end
+
 		if activeTrack and mario.AnimSetFrame > -1 then
+			if isExternalAnims and animator then
+				animator:SetAttribute("AnimSetFrame", mario.AnimSetFrame)
+			end
+
 			activeTrack.TimePosition = mario.AnimSetFrame / STEP_RATE
 			mario.AnimSetFrame = -1
 		end
@@ -622,13 +856,15 @@ local function update()
 			local actionId = mario.Action()
 			local throw = mario.ThrowMatrix
 
+			local health = bit32.rshift(mario.Health, 8)
+
 			if throw then
 				local throwPos = Util.ToRoblox(throw.Position)
 				goalCF = throw.Rotation * FLIP + throwPos
 			end
 
 			if alignCF then
-				local nextCF = prevCF:Lerp(goalCF, subframe)
+				local nextCF = if FFlags.NO_CHAR_INTERP then goalCF else prevCF:Lerp(goalCF, subframe)
 
 				-- stylua: ignore
 				cf = if mario.AnimSkipInterp > 0
@@ -636,6 +872,13 @@ local function update()
 					else nextCF
 
 				alignCF.CFrame = cf.Rotation
+			end
+
+			if humanoid then
+				local nextCamOffset = if FFlags.NO_CHAR_INTERP
+					then goalCameraOffset
+					else prevCameraOffset:Lerp(goalCameraOffset, subframe)
+				humanoid.CameraOffset = nextCamOffset
 			end
 
 			local isDebug = character:GetAttribute("Debug")
@@ -659,15 +902,39 @@ local function update()
 				setDebugStat("Wall", wall and wall.Instance.Name or NULL_TEXT)
 
 				local floor = mario.Floor
-				setDebugStat("Floor", floor and floor.Instance.Name or NULL_TEXT)
+				local floorType = floor and ` (SurfaceClass.{Enums.GetName(SurfaceClass, mario:GetFloorType())})` or ""
+				setDebugStat("Floor", floor and floor.Instance.Name .. floorType or NULL_TEXT)
 
 				local ceil = mario.Ceil
-				setDebugStat("Ceiling", ceil and ceil.Instance.Name or NULL_TEXT)
-			end
+				local ceilType = ceil and ` (SurfaceClass.{Enums.GetName(SurfaceClass, mario:GetCeilType())})` or ""
+				setDebugStat("Ceiling", ceil and ceil.Instance.Name .. ceilType or NULL_TEXT)
 
-			for _, name in AUTO_STATS do
-				local value = rawget(mario :: any, name)
-				setDebugStat(name, value)
+				setDebugStat(
+					"Health",
+					`{health} ({string.format("0x%X", mario.Health)}, {mario.Health}) (INC {mario.HealCounter} | DEC {mario.HurtCounter})`
+				)
+
+				setDebugStat("SquishTimer", mario.SquishTimer)
+
+				local caps: { string? } = {}
+				table.insert(caps, mario.Flags:Has(MarioFlags.CAP_ON_HEAD) and "Normal" or nil)
+				table.insert(caps, mario.Flags:Has(MarioFlags.VANISH_CAP) and "Vanish" or nil)
+				table.insert(caps, mario.Flags:Has(MarioFlags.METAL_CAP) and "Metal" or nil)
+				table.insert(caps, mario.Flags:Has(MarioFlags.WING_CAP) and "Wing" or nil)
+
+				setDebugStat(
+					"MarioCaps",
+					`Timer {mario.CapTimer}, Caps: {#caps == 0 and "None" or table.concat(caps, ", ")}`
+				)
+
+				setDebugStat("Inertia", mario.Inertia)
+
+				-- setDebugStat("HasHeldObj", ((mario :: any).HeldObj ~= nil) and TRUE_TEXT or FALSE_TEXT)
+
+				for _, name in AUTO_STATS do
+					local value = rawget(mario :: any, name)
+					setDebugStat(name, value)
+				end
 			end
 
 			if alignPos then
@@ -678,7 +945,11 @@ local function update()
 			local headAngle = bodyState.HeadAngle
 			local torsoAngle = bodyState.TorsoAngle
 
-			if actionId ~= Action.BUTT_SLIDE and actionId ~= Action.WALKING then
+			if
+				actionId ~= Action.BUTT_SLIDE
+				and actionId ~= Action.WALKING
+				and actionId ~= Action.RIDING_SHELL_GROUND
+			then
 				bodyState.TorsoAngle *= 0
 			end
 
@@ -692,6 +963,11 @@ local function update()
 				lastHeadAngle = headAngle
 			end
 
+			if health ~= lastHealth then
+				networkDispatch("SetHealth", health)
+				lastHealth = health
+			end
+
 			if particles then
 				for name, flag in pairs(ParticleFlags) do
 					local inst = particles:FindFirstChild(name, true)
@@ -700,10 +976,6 @@ local function update()
 						local particle = inst :: ParticleEmitter
 						local emit = particle:GetAttribute("Emit")
 						local hasFlag = mario.ParticleFlags:Has(flag)
-
-						if hasFlag then
-							print("SetParticle", name)
-						end
 
 						if emit then
 							if hasFlag then
@@ -744,9 +1016,21 @@ local function update()
 end
 
 reset.Event:Connect(onReset)
-RunService.Heartbeat:Connect(update)
+shared.LocalMario = mario
 
-while task.wait(1) do
+player.CharacterAdded:Connect(function()
+	-- Reset loaded animations if a new character
+	-- has been loaded/replaced to
+	table.clear(loadedAnims)
+end)
+
+RunService.Heartbeat:Connect(function(dt: number)
+	debug.profilebegin("SM64::update")
+	update(dt)
+	debug.profileend()
+end)
+
+while true do
 	local success = pcall(function()
 		return StarterGui:SetCore("ResetButtonCallback", reset)
 	end)
@@ -754,6 +1038,10 @@ while task.wait(1) do
 	if success then
 		break
 	end
+
+	task.wait(0.25)
 end
 
 -------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+	
